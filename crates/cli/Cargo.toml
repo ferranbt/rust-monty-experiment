@@ -1,0 +1,18 @@
+[package]
+name = "dut-cli"
+description = "dut: check device scripts and run them against a serial port"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "dut"
+path = "src/main.rs"
+
+[dependencies]
+dut-runtime.workspace = true
+clap.workspace = true
+serialport.workspace = true
+
+[dev-dependencies]
+pollster.workspace = true
+eyre.workspace = true

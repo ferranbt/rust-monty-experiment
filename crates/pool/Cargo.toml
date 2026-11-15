@@ -1,0 +1,16 @@
+[package]
+name = "dut-pool"
+description = "Run device scripts for many devices in parallel, isolated in worker processes"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+dut-runtime.workspace = true
+monty.workspace = true
+monty-types.workspace = true
+monty-pool.workspace = true
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+
+[dev-dependencies]
+eyre.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

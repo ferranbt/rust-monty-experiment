@@ -1,0 +1,18 @@
+[package]
+name = "dut-runtime"
+description = "Run sandboxed device scripts (Monty) against any Host implementation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+monty.workspace = true
+monty-types.workspace = true
+pollster.workspace = true
+
+# Browser WASM (wasm32-unknown-unknown): Monty needs randomness from JS.
+# Also build with RUSTFLAGS='--cfg getrandom_backend="wasm_js"'. WASI targets need nothing.
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[dev-dependencies]
+eyre.workspace = true

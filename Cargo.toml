@@ -1,0 +1,20 @@
+[workspace]
+members = ["crates/runtime", "crates/pool", "crates/cli"]
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+dut-runtime = { path = "crates/runtime" }
+# Pinned together, and to the `monty` worker binary (`cargo install monty-runtime --version =1.6.0`):
+# Monty is experimental and its API and wire protocol change between releases.
+monty = "=1.6.0"
+monty-types = "=1.6.0"
+monty-pool = "=1.6.0"
+clap = { version = "4.6.7", features = ["derive"] }
+serialport = { version = "4.10.1", default-features = false }
+eyre = "0.6"
+tokio = "1.54"
+pollster = "1.0"
