@@ -18,6 +18,7 @@ _rt = {
     "in_request": False,  # one request in flight at a time (SPEC §6.3)
     "pending": [],        # timer ids whose ticks arrived while busy
     "fail_raised": False, # set by fail() so dispatch doesn't double-report
+    "metrics": {},        # name -> Counter/Gauge, filled as they are declared
 }
 
 

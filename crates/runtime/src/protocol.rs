@@ -21,6 +21,11 @@ include!(concat!(env!("OUT_DIR"), "/sdk.rs"));
 
 pub const SUPPORTED_SDK_VERSIONS: &[&str] = &["0.1"];
 
+/// The embedded SDK package: `(file name, source)` for every `sdk/<SDK_MODULE>/*.py`.
+pub fn sdk_files() -> &'static [(&'static str, &'static str)] {
+    SDK_FILES
+}
+
 /// Script name used in tracebacks.
 pub const SCRIPT_NAME: &str = "device.py";
 /// Sandbox working directory: top-level imports search here, so `import dut` finds the SDK.
@@ -109,16 +114,26 @@ pub struct Registry {
     pub handlers: usize,
     pub timers: Vec<TimerSpec>,
     pub readers: Vec<String>,
-    /// Events the script may report, declared in `Device(events=...)`.
-    pub events: BTreeMap<String, EventType>,
+    /// The `Counter`s and `Gauge`s the script declared, by name.
+    pub metrics: BTreeMap<String, MetricInfo>,
 }
 
-/// A declared event: what it means and which fields it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetricKind {
+    /// Samples are increments; the host keeps the total.
+    Counter,
+    /// Samples are the current value.
+    Gauge,
+}
+
+/// A declared metric.
 #[derive(Debug, Clone, PartialEq)]
-pub struct EventType {
+pub struct MetricInfo {
+    pub kind: MetricKind,
     pub description: String,
-    /// Field name -> description.
-    pub fields: BTreeMap<String, String>,
+    pub unit: Option<String>,
+    /// Label names every sample carries.
+    pub labels: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -555,30 +570,28 @@ pub fn parse_registry(v: &Value) -> Result<Registry, String> {
         handlers: field(v, "handlers")?.as_int().unwrap_or(0) as usize,
         timers,
         readers: strings(field(v, "readers")?),
-        events: match v.get("events") {
+        metrics: match v.get("metrics") {
             Some(Value::Dict(d)) => d
                 .iter()
-                .map(|(name, spec)| (name.clone(), event_type(spec)))
+                .map(|(name, spec)| (name.clone(), metric_info(spec)))
                 .collect(),
             _ => BTreeMap::new(),
         },
     })
 }
 
-fn event_type(spec: &Value) -> EventType {
-    let fields = match spec.get("fields") {
-        Some(Value::Dict(d)) => d
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string()))
-            .collect(),
-        _ => BTreeMap::new(),
-    };
-    EventType {
+fn metric_info(spec: &Value) -> MetricInfo {
+    MetricInfo {
+        kind: match spec.get("type").and_then(Value::as_str) {
+            Some("counter") => MetricKind::Counter,
+            _ => MetricKind::Gauge,
+        },
         description: spec
             .get("description")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string(),
-        fields,
+        unit: spec.get("unit").and_then(Value::as_str).map(str::to_string),
+        labels: spec.get("labels").map(strings).unwrap_or_default(),
     }
 }

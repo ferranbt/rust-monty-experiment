@@ -5,20 +5,18 @@ use crate::{
 };
 use eyre::{Result, WrapErr, bail};
 
-/// Events the test scripts may report.
-pub const EVENTS: &str =
-    r#"{"door": {"description": "door opened or closed", "fields": {"open": "True when open"}}}"#;
-
 pub const IMPORTS: &str = "from dut import (Device, Framing, state, write, now, emit, next_event, wait, \
-    request, expect, wait_until, heartbeat, identity, record, event, fail, pack, unpack, crc, \
+    request, expect, wait_until, heartbeat, identity, Counter, Gauge, fail, pack, unpack, crc, \
     cobs_encode, cobs_decode, slip_encode, slip_decode, bytes_from_list)\n";
 
 /// A device script with standard imports and a Device. With `parser`, every frame
-/// is recorded as `{"frame": <bytes>}` so tests can see what reached the parser.
+/// is emitted as a `parsed` signal `{"frame": <bytes>}` so tests can see what reached the parser.
 pub fn script(body: &str, parser: bool) -> String {
-    let mut src = format!("{IMPORTS}dev = Device(\"t\", sdk=\"0.1\", events={EVENTS})\n");
+    let mut src = format!("{IMPORTS}dev = Device(\"t\", sdk=\"0.1\")\n");
     if parser {
-        src.push_str("@dev.on_frame\ndef _parse(frame):\n    record({\"frame\": frame})\n");
+        src.push_str(
+            "@dev.on_frame\ndef _parse(frame):\n    emit(\"parsed\", {\"frame\": frame})\n",
+        );
     }
     src + body
 }
@@ -87,10 +85,26 @@ impl Session {
         self.host().tx("main")
     }
 
+    /// Samples of one metric, in order: (value, labels).
+    pub fn metric(&self, name: &str) -> Vec<(f64, Vec<(String, String)>)> {
+        self.host()
+            .signals
+            .iter()
+            .filter_map(|s| s.metric())
+            .filter(|m| m.name == name)
+            .map(|m| (m.value, m.labels.into_iter().collect()))
+            .collect()
+    }
+
+    /// Values of one metric, in order.
+    pub fn values(&self, name: &str) -> Vec<f64> {
+        self.metric(name).into_iter().map(|(v, _)| v).collect()
+    }
+
     /// Frames that reached the recording parser, in order.
     pub fn parsed(&self) -> Vec<Vec<u8>> {
         self.host()
-            .of_kind("record")
+            .of_kind("parsed")
             .into_iter()
             .filter_map(|p| p.get("frame").and_then(Value::as_bytes).map(<[u8]>::to_vec))
             .collect()

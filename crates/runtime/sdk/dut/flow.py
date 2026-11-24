@@ -1,8 +1,12 @@
 # Runs INSIDE the Monty sandbox. Sugar over next_event (SPEC §6.3).
 #
-# Rule: every incoming frame is dispatched to all on_frame handlers before any
-# predicate sees it. request/expect only *watch* the stream.
-from dut.core import write, next_event, now, emit, _rt
+# Rule: every incoming frame is dispatched to all handlers before any predicate
+# sees it. request/expect only *watch* the stream.
+from dut.core import next_event, now, emit, _rt
+from dut.core import write as _host_write
+
+# Frames shown in a timeout error: the last few seen while waiting.
+_SEEN = 3
 
 
 def _is_data(ev):
@@ -13,16 +17,74 @@ def _error_text(e):
     return f"{type(e).__name__}: {e}"
 
 
-def _run_handler(fn, ev):
+def _decode(data):
+    # Text-mode frames: junk bytes become U+FFFD instead of raising.
+    if isinstance(data, bytes):
+        return data.decode("utf-8", "replace")
+    return data
+
+
+def _to_bytes(data):
+    if isinstance(data, str):
+        return data.encode()
+    return data
+
+
+def write(data, channel="main"):
+    """Send a message to the device, encoded by the Device's format. A str is sent UTF-8 encoded."""
+    dev = _rt["device"]
+    if dev is not None:
+        data = dev.format.encode(data)
+    _host_write(_to_bytes(data), channel)
+
+
+def _next(timeout):
+    # next_event, with frame data decoded by the Device's format. A frame the
+    # format rejects is reported and skipped.
+    deadline = now() + timeout
+    while True:
+        ev = next_event(max(0, deadline - now()))
+        dev = _rt["device"]
+        if ev is None or not _is_data(ev) or dev is None:
+            return ev
+        try:
+            ev["data"] = dev.format.decode(ev["data"])
+            return ev
+        except Exception as e:
+            frame = ev["data"]
+            emit("format_error", {"error": _error_text(e), "channel": ev["channel"],
+                                  "frame": frame.hex() if isinstance(frame, bytes) else frame})
+            if now() >= deadline:
+                return None
+
+
+def _report(e, ev):
+    if _rt["fail_raised"]:
+        _rt["fail_raised"] = False   # fail() already reported it
+        return
+    data = ev["data"]
+    frame = data.hex() if isinstance(data, bytes) else data
+    emit("parse_error", {"error": _error_text(e), "channel": ev["channel"], "frame": frame})
+
+
+def _run_handler(fn, arg, ev):
     _rt["fail_raised"] = False
     try:
-        fn(ev["data"])
+        fn(arg)
     except Exception as e:
-        if _rt["fail_raised"]:
-            _rt["fail_raised"] = False   # fail() already reported it
+        _report(e, ev)
+
+
+def _run_line_handler(fn, match, ev):
+    _rt["fail_raised"] = False
+    named = match.groupdict()
+    try:
+        if len(named) > 0:
+            fn(**named)
         else:
-            emit("parse_error", {"error": _error_text(e), "channel": ev["channel"],
-                                 "frame": ev["data"].hex()})
+            fn(*match.groups())
+    except Exception as e:
+        _report(e, ev)
 
 
 def _run_timer(timer_id):
@@ -44,10 +106,19 @@ def _dispatch(ev):
     if dev is None:
         return
     if _is_data(ev):
+        if isinstance(ev["data"], str):
+            # Every text line is logged; scripts never have to.
+            emit("log", {"text": ev["data"]})
         _rt["dispatching"] = True
         try:
             for fn in dev.handlers:
-                _run_handler(fn, ev)
+                _run_handler(fn, ev["data"], ev)
+            if len(dev.line_handlers) > 0:
+                line = _decode(ev["data"])
+                for h in dev.line_handlers:
+                    match = h["pattern"].match(line)
+                    if match is not None:
+                        _run_line_handler(h["fn"], match, ev)
         finally:
             _rt["dispatching"] = False
     elif ev["kind"] == "tick":
@@ -74,7 +145,7 @@ def _no_wait_in_handler(name):
 def wait(pred, timeout):
     """Process events until pred(event) is true. Returns the event, or None on timeout.
 
-    Every frame is dispatched to the on_frame handlers before pred sees it.
+    Every frame is dispatched to the handlers before pred sees it.
     """
     _no_wait_in_handler("wait")
     deadline = now() + timeout
@@ -84,7 +155,7 @@ def wait(pred, timeout):
             remaining = deadline - now()
             if remaining <= 0:
                 return None
-            ev = next_event(remaining)
+            ev = _next(remaining)
             if ev is None:
                 return None
             _dispatch(ev)
@@ -95,10 +166,14 @@ def wait(pred, timeout):
 
 
 def _matcher(match):
-    # bytes -> prefix match; otherwise a function(frame) -> bool.
+    # bytes/str -> prefix match; otherwise a function(frame) -> bool.
     # A match function that raises on a junk frame counts as "no match".
-    if isinstance(match, bytes):
-        return lambda f: f.startswith(match)
+    if isinstance(match, bytes) or isinstance(match, str):
+        def prefix(f):
+            if isinstance(f, str):
+                return f.startswith(_decode(match))
+            return f.startswith(_to_bytes(match))
+        return prefix
 
     def safe(f):
         try:
@@ -108,9 +183,24 @@ def _matcher(match):
     return safe
 
 
-def _frame_on(channel, match):
+def _watch(channel, match, seen):
+    # Frame predicate that also remembers the last frames on `channel`.
     m = _matcher(match)
-    return lambda ev: _is_data(ev) and ev["channel"] == channel and m(ev["data"])
+
+    def pred(ev):
+        if not _is_data(ev) or ev["channel"] != channel:
+            return False
+        seen.append(ev["data"])
+        if len(seen) > _SEEN:
+            seen.pop(0)
+        return m(ev["data"])
+    return pred
+
+
+def _seen_text(seen):
+    if len(seen) == 0:
+        return "nothing received"
+    return "last frames: " + ", ".join([repr(f) for f in seen])
 
 
 def request(data, match, timeout=1.0, channel="main"):
@@ -118,25 +208,27 @@ def request(data, match, timeout=1.0, channel="main"):
     _no_wait_in_handler("request")
     if _rt["in_request"]:
         raise RuntimeError("request() already in flight")
+    seen = []
     _rt["in_request"] = True
     try:
         write(data, channel)
-        ev = wait(_frame_on(channel, match), timeout)
+        ev = wait(_watch(channel, match, seen), timeout)
     finally:
         _rt["in_request"] = False
     if ev is None:
-        raise TimeoutError(f"request: no matching reply within {timeout}s")
+        raise TimeoutError(f"request: no matching reply within {timeout}s; "
+                           f"sent {_to_bytes(data)!r}; {_seen_text(seen)}")
     return ev["data"]
 
 
 def expect(prefix, timeout=1.0, channel="main"):
     """Wait for a frame starting with `prefix`. Returns it. Raises TimeoutError."""
     _no_wait_in_handler("expect")
-    if isinstance(prefix, str):
-        prefix = prefix.encode()
-    ev = wait(_frame_on(channel, prefix), timeout)
+    seen = []
+    ev = wait(_watch(channel, prefix, seen), timeout)
     if ev is None:
-        raise TimeoutError(f"expect: no frame starting with {prefix} within {timeout}s")
+        raise TimeoutError(f"expect: no frame starting with {prefix!r} within {timeout}s; "
+                           f"{_seen_text(seen)}")
     return ev["data"]
 
 
@@ -145,6 +237,12 @@ def wait_until(cond, timeout=1.0):
     _no_wait_in_handler("wait_until")
     if cond():
         return True
-    if wait(lambda ev: cond(), timeout) is None:
-        raise TimeoutError(f"wait_until: condition not met within {timeout}s")
+    seen = []
+    watch = _watch("main", lambda f: False, seen)
+
+    def pred(ev):
+        watch(ev)
+        return cond()
+    if wait(pred, timeout) is None:
+        raise TimeoutError(f"wait_until: condition not met within {timeout}s; {_seen_text(seen)}")
     return True

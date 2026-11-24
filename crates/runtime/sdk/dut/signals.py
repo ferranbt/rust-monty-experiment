@@ -12,26 +12,6 @@ def identity(data):
     emit("identity", data)
 
 
-def record(data):
-    if not isinstance(data, dict):
-        raise TypeError("record() takes a dict")
-    emit("record", data)
-
-
-def event(name, **data):
-    """Report a declared event. Name and fields must be declared in Device(events=...)."""
-    dev = _rt["device"]
-    if dev is None or name not in dev.events:
-        raise ValueError(f"event '{name}' is not declared in Device(events=...)")
-    fields = dev.events[name]["fields"]
-    for key in data:
-        if key not in fields:
-            raise ValueError(f"event '{name}' has no field '{key}'")
-    payload = dict(data)
-    payload["name"] = name
-    emit("event", payload)
-
-
 def log(text, **fields):
     """A log line, reported to the host like any other signal (kind "log")."""
     payload = dict(fields)

@@ -1,36 +1,20 @@
 # Runs INSIDE the Monty sandbox. Device declaration and registry.
 #
 # Monty has no __name__ on functions, so the decorator decides the name.
+import re
+
 from dut.core import _rt, SDK_VERSION
 from dut.framing import Framing
+from dut.formats import Raw
+from dut.metrics import _describe as _describe_metrics
 
 VERBS = ["set_channel", "tx_on", "rx_start", "rx_count", "status"]
 HOOKS = ["prepare", "enter", "exit", "recover", "finish"]
 
 
-def _event_types(events):
-    # {"name": "description"} or {"name": {"description": ..., "fields": {"f": "description"}}}
-    out = {}
-    if events is None:
-        return out
-    if not isinstance(events, dict):
-        raise TypeError("events must be a dict of name -> description")
-    for name in events:
-        spec = events[name]
-        if isinstance(spec, str):
-            spec = {"description": spec}
-        if not isinstance(spec, dict) or not isinstance(spec.get("description"), str):
-            raise ValueError(f"event '{name}' needs a description")
-        fields = spec.get("fields", {})
-        if not isinstance(fields, dict):
-            raise ValueError(f"event '{name}': fields must be a dict of name -> description")
-        out[name] = {"description": spec["description"], "fields": dict(fields)}
-    return out
-
-
 class Device:
     def __init__(self, name, framing=None, heartbeat_within=None, channels=None, sdk=None,
-                 events=None):
+                 format=None):
         if _rt["device"] is not None:
             raise RuntimeError("only one Device per script")
         if not isinstance(name, str) or name == "":
@@ -42,10 +26,14 @@ class Device:
         self.framing = framing if framing is not None else Framing.delimiter(b"\n")
         self.heartbeat_within = heartbeat_within
         self.channels = channels if channels is not None else {}
-        self.events = _event_types(events)
+        # Any object with decode(frame) and encode(message); see dut.formats.
+        self.format = format if format is not None else Raw()
+        if not hasattr(self.format, "decode") or not hasattr(self.format, "encode"):
+            raise TypeError("format must have decode(frame) and encode(message) methods")
         self.verbs = {}
         self.hooks = {}
         self.handlers = []
+        self.line_handlers = []
         self.timers = []
         self.readers = {}
         _rt["device"] = self
@@ -98,6 +86,23 @@ class Device:
         self.handlers.append(fn)
         return fn
 
+    def on_line(self, pattern):
+        """Call the function for every line matching `pattern`, a regex anchored at the
+        start of the line. Named groups arrive as keyword arguments; a pattern without
+        named groups passes its groups positionally.
+
+            @dev.on_line(r"T=(?P<temp>-?[0-9.]+)")
+            def temp(temp): ...
+        """
+        if not isinstance(pattern, str) or pattern == "":
+            raise ValueError("on_line(pattern): pattern must be a non-empty str")
+        compiled = re.compile(pattern)
+
+        def deco(fn):
+            self.line_handlers.append({"pattern": compiled, "fn": fn})
+            return fn
+        return deco
+
     def every(self, seconds):
         if seconds <= 0:
             raise ValueError("every(seconds=...) must be > 0")
@@ -141,8 +146,8 @@ class Device:
             "channels": self.channels,
             "verbs": verbs,
             "hooks": sorted(self.hooks.keys()),
-            "handlers": len(self.handlers),
+            "handlers": len(self.handlers) + len(self.line_handlers),
             "timers": timers,
             "readers": sorted(self.readers.keys()),
-            "events": self.events,
+            "metrics": _describe_metrics(),
         }

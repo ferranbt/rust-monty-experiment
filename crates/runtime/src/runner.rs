@@ -20,7 +20,7 @@ use crate::protocol::{
     event_object, host_exception, parse_registry, value_of,
 };
 pub use crate::protocol::{
-    EventType, Registry, SDK_MODULE, SUPPORTED_SDK_VERSIONS, ScriptError, VerbInfo,
+    MetricInfo, MetricKind, Registry, SDK_MODULE, SUPPORTED_SDK_VERSIONS, ScriptError, VerbInfo,
 };
 
 /// Loads a device script and drives it. Monty stays behind this interface (SPEC §7).

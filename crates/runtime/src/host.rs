@@ -208,12 +208,11 @@ pub struct Event {
 pub enum SignalKind {
     /// `heartbeat(ok=...)`: `{"ok": bool}`.
     Heartbeat,
-    /// `identity(**fields)`: whatever the device exposes (firmware, serial, ...).
+    /// `identity(dict)`: whatever the device exposes (firmware, serial, ...).
     Identity,
-    /// `record(dict)`: one telemetry record.
-    Record,
-    /// `event(name, **fields)`: `{"name", ...declared fields}`.
-    Event,
+    /// A `Counter.inc()` or `Gauge.set()` sample: `{"name", "value": float, "labels": {str: str}}`.
+    /// Counters report the increment, not the total. See [`Signal::metric`](crate::Signal::metric).
+    Metric,
     /// `log(text, **fields)`: `{"text", ...fields}`.
     Log,
     /// `fail(msg)`: `{"msg"}`; the verb or hook was aborted.
@@ -232,8 +231,7 @@ impl SignalKind {
         match self {
             SignalKind::Heartbeat => "heartbeat",
             SignalKind::Identity => "identity",
-            SignalKind::Record => "record",
-            SignalKind::Event => "event",
+            SignalKind::Metric => "metric",
             SignalKind::Log => "log",
             SignalKind::Fail => "fail",
             SignalKind::ParseError => "parse_error",
@@ -249,8 +247,7 @@ impl From<&str> for SignalKind {
         match kind {
             "heartbeat" => SignalKind::Heartbeat,
             "identity" => SignalKind::Identity,
-            "record" => SignalKind::Record,
-            "event" => SignalKind::Event,
+            "metric" => SignalKind::Metric,
             "log" => SignalKind::Log,
             "fail" => SignalKind::Fail,
             "parse_error" => SignalKind::ParseError,

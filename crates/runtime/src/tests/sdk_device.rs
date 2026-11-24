@@ -154,13 +154,16 @@ fn load_errors() -> Result<()> {
 #[test]
 fn signals_are_timestamped_by_the_host() -> Result<()> {
     let body = r#"
+temp = Gauge("temp_c", "temperature", unit="°C")
+doors = Counter("doors", "door state changes", labels=["state"])
+
 @dev.verb("sig")
 def sig():
     heartbeat()
     heartbeat(ok=False)
     identity({"fw": "1.2", "sha": "ab12"})
-    record({"temp_c": 21.5})
-    event("door", open=True)
+    temp.set(21.5)
+    doors.inc(state="open")
 "#;
     let mut s = Session::bare(body, SimDevice::new())?;
     s.runner.host_mut().set_time(7.0);
@@ -181,11 +184,23 @@ def sig():
                 "identity",
                 Value::dict([("fw", "1.2".into()), ("sha", "ab12".into())])
             ),
-            (7.0, "record", Value::dict([("temp_c", 21.5.into())])),
             (
                 7.0,
-                "event",
-                Value::dict([("open", true.into()), ("name", "door".into())])
+                "metric",
+                Value::dict([
+                    ("name", "temp_c".into()),
+                    ("value", 21.5.into()),
+                    ("labels", Value::dict::<&str>([]))
+                ])
+            ),
+            (
+                7.0,
+                "metric",
+                Value::dict([
+                    ("name", "doors".into()),
+                    ("value", 1.0.into()),
+                    ("labels", Value::dict([("state", "open".into())]))
+                ])
             ),
         ]
     );
@@ -208,21 +223,14 @@ fn fail_reports_and_aborts_verb() -> Result<()> {
 
 #[test]
 fn parser_exception_is_reported_and_next_frames_still_parsed() -> Result<()> {
-    let body =
-        "@dev.on_frame\ndef strict(frame):\n    record({\"temp_c\": float(frame.decode())})\n";
+    let body = "temp = Gauge(\"temp_c\", \"temperature\")\n@dev.on_frame\ndef strict(frame):\n    temp.set(float(frame.decode()))\n";
     let sim = SimDevice::new()
         .at(0.1, b"21.5\n")
         .at(0.2, b"garbage\n")
         .at(0.3, b"22\n");
     let mut s = Session::bare(body, sim)?;
     s.pump(1.0)?;
-    assert_eq!(
-        s.of_kind("record"),
-        [
-            Value::dict([("temp_c", 21.5.into())]),
-            Value::dict([("temp_c", 22.0.into())])
-        ]
-    );
+    assert_eq!(s.values("temp_c"), [21.5, 22.0]);
     let errs = s.of_kind("parse_error");
     assert_eq!(errs.len(), 1);
     assert_eq!(
@@ -320,14 +328,13 @@ def slow():
 
 #[test]
 fn timer_may_request_when_idle() -> Result<()> {
-    let body = "@dev.every(seconds=2)\ndef poll():\n    r = request(b\"status\\n\", match=b\"st=\", timeout=1)\n    record({\"status\": r[3:].decode()})\n";
+    let body = "ok = Gauge(\"status_ok\", \"1 when the status is ok\")\n@dev.every(seconds=2)\ndef poll():\n    r = request(b\"status\\n\", match=b\"st=\", timeout=1)\n    ok.set(r[3:] == b\"ok\")\n";
     let mut s = Session::bare(
         body,
         SimDevice::new().on(Rule::prefix(b"status").reply(b"st=ok\n")),
     )?;
     s.pump(5.0)?;
-    let ok = Value::dict([("status", "ok".into())]);
-    assert_eq!(s.of_kind("record"), [ok.clone(), ok]);
+    assert_eq!(s.values("status_ok"), [1.0, 1.0]);
     Ok(())
 }
 
@@ -350,13 +357,12 @@ fn timer_errors_are_reported() -> Result<()> {
 }
 
 #[test]
-fn reader_returns_one_record_per_call() -> Result<()> {
-    let body = "@dev.reader\ndef temps():\n    f = expect(b\"T=\", timeout=5)\n    return {\"temp_c\": float(f[2:].decode())}\n";
+fn reader_returns_one_value_per_call() -> Result<()> {
+    let body = "temp = Gauge(\"temp_c\", \"temperature\")\n@dev.reader\ndef temps():\n    f = expect(b\"T=\", timeout=5)\n    v = float(f[2:].decode())\n    temp.set(v)\n    return v\n";
     let mut s = Session::bare(body, SimDevice::new().every(1.0, b"T=20\n"))?;
-    let rec = Value::dict([("temp_c", 20.0.into())]);
-    assert_eq!(s.read()?, rec);
-    assert_eq!(s.read()?, rec);
-    assert_eq!(s.of_kind("record"), [rec.clone(), rec]);
+    assert_eq!(s.read()?, Value::Float(20.0));
+    assert_eq!(s.read()?, Value::Float(20.0));
+    assert_eq!(s.values("temp_c"), [20.0, 20.0]);
     assert_approx(s.now(), 2.0);
     Ok(())
 }
@@ -387,7 +393,7 @@ def bin_cmd():
 fn helper_errors_become_python_exceptions() -> Result<()> {
     let mut s = Session::new("", SimDevice::new())?;
     expect_err(s.eval("unpack('<H', b'\\x01')"), "ValueError")?;
-    expect_err(s.eval("write('not bytes')"), "TypeError")?;
+    expect_err(s.eval("write(42)"), "TypeError")?;
     assert_eq!(
         s.eval(
             "r = None\ntry:\n    crc('nope', b'')\nexcept ValueError as e:\n    r = 'caught'\nr"

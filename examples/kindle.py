@@ -11,31 +11,26 @@
 #
 #   $ echo "battery=$(lipc-get-prop com.lab126.powerd battLevel)"
 #   battery=87
-from dut import Device, Framing, request, heartbeat, identity, record, event, log, fail
+from dut import Device, Framing, Text, request, heartbeat, identity, fail, Counter, Gauge
 from dut.shell import query, run, assert_shell_exists
 
 dev = Device(
     "kindle",
     sdk="0.1",
     framing=Framing.delimiter(b"\r\n"),
+    format=Text(),
     heartbeat_within=30,
-    events={
-        "reboot": "The Kindle rebooted: the kernel boot banner appeared on the console",
-        "battery_low": {
-            "description": "Battery level dropped below 10 %",
-            "fields": {"level": "battery level in %"},
-        },
-    },
 )
 
+battery_pct = Gauge("battery_pct", "Battery level", unit="%")
+charging = Gauge("charging", "1 while charging")
+reboots = Counter("reboots", "Kernel boot banners seen on the console")
+battery_low = Counter("battery_low", "Battery readings below 10 %")
 
-@dev.on_frame
-def parse(frame):
-    line = frame.decode()
-    log(line)
 
-    if "Booting Linux" in line:
-        event("reboot")
+@dev.on_line(r".*Booting Linux")
+def booted():
+    reboots.inc()
 
 
 @dev.hook("prepare")
@@ -52,11 +47,11 @@ def prepare():
 @dev.every(seconds=10)
 def telemetry():
     level = int(query("battery", "lipc-get-prop com.lab126.powerd battLevel"))
-    charging = query("charging", "lipc-get-prop com.lab126.powerd isCharging") == "1"
     heartbeat()
-    record({"battery_pct": level, "charging": charging})
+    battery_pct.set(level)
+    charging.set(query("charging", "lipc-get-prop com.lab126.powerd isCharging") == "1")
     if level < 10:
-        event("battery_low", level=level)
+        battery_low.inc()
 
 
 @dev.status
@@ -76,4 +71,4 @@ def tx_on():
 
 @dev.hook("recover")
 def recover():
-    request(b"reboot\n", match=lambda f: b"Booting Linux" in f, timeout=120)
+    request("reboot\n", match=lambda line: "Booting Linux" in line, timeout=120)

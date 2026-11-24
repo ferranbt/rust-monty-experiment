@@ -1,6 +1,7 @@
 //! What a host records: the raw log (every byte both ways, host-timestamped)
 //! and the signals emitted by the script. Shared by every [`Host`](crate::Host).
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::host::{Seconds, SignalKind, Value};
@@ -28,7 +29,35 @@ pub struct Signal {
     pub payload: Value,
 }
 
+/// One metric sample, read from a [`SignalKind::Metric`] signal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Metric<'a> {
+    pub name: &'a str,
+    /// A gauge's value, or a counter's increment.
+    pub value: f64,
+    pub labels: BTreeMap<String, String>,
+}
+
 impl Signal {
+    /// The sample of a metric signal; `None` for every other kind.
+    pub fn metric(&self) -> Option<Metric<'_>> {
+        if self.kind != SignalKind::Metric {
+            return None;
+        }
+        let labels = match self.payload.get("labels") {
+            Some(Value::Dict(d)) => d
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        Some(Metric {
+            name: self.payload.get("name").and_then(Value::as_str)?,
+            value: self.payload.get("value").and_then(Value::as_float)?,
+            labels,
+        })
+    }
+
     /// The text of a `log(...)` signal; `None` for every other kind.
     pub fn log_text(&self) -> Option<&str> {
         if self.kind != SignalKind::Log {

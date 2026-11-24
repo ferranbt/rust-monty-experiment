@@ -1,6 +1,9 @@
 //! `dut` CLI for device scripts.
 
+mod interactive;
+mod replay;
 mod serial;
+mod typecheck;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,7 +13,7 @@ use clap::{Parser, Subcommand};
 use dut_runtime::runner::SUPPORTED_SDK_VERSIONS;
 use dut_runtime::{FakeHost, JsonLinesRecorder, MontyRunner, Registry, ScriptError, ScriptRunner};
 
-use crate::serial::{SerialHost, Transport, open_port};
+use crate::serial::{Link, SerialHost, Transport, connect_tcp, open_port};
 
 #[derive(Parser)]
 #[command(name = "dut", version, about = "Tools for device scripts")]
@@ -19,23 +22,46 @@ struct Cli {
     command: Command,
 }
 
+/// Where the device is: `--port` (serial) or `--tcp` (emulator console, network bridge).
+#[derive(clap::Args)]
+struct Connection {
+    /// Serial port. Linux: /dev/ttyUSB0, /dev/ttyACM0, /dev/serial0 (Pi).
+    /// macOS: /dev/cu.usbserial-*, /dev/cu.usbmodem* (use cu.*, not tty.*).
+    #[arg(long, required_unless_present = "tcp", conflicts_with = "tcp")]
+    port: Option<String>,
+    /// TCP address of the device's serial stream, e.g. localhost:4321 for QEMU
+    /// `-serial tcp::4321,server`, Renode or Wokwi.
+    #[arg(long)]
+    tcp: Option<String>,
+    /// Serial baud rate (ignored with --tcp).
+    #[arg(long, default_value_t = 115_200)]
+    baud: u32,
+}
+
+impl Connection {
+    fn open(&self) -> Result<Link, String> {
+        match (&self.port, &self.tcp) {
+            (_, Some(address)) => connect_tcp(address).map(Link::Tcp),
+            (Some(port), None) => open_port(port, self.baud).map(Link::Serial),
+            (None, None) => unreachable!("clap requires --port or --tcp"),
+        }
+        .map_err(|e| e.to_string())
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
-    /// Load a device script in the sandbox and check what it declares.
+    /// Type-check a device script, load it in the sandbox and check what it declares.
     Test {
         /// Path to the device script.
         script: PathBuf,
     },
-    /// Run a device script against a serial port; signals stream to stdout as JSON lines.
+    /// Run a device script against a device; signals stream to stdout as JSON lines.
     Run {
         /// Path to the device script.
         script: PathBuf,
-        /// Serial port. Linux: /dev/ttyUSB0, /dev/ttyACM0, /dev/serial0 (Pi).
-        /// macOS: /dev/cu.usbserial-*, /dev/cu.usbmodem* (use cu.*, not tty.*).
-        #[arg(long)]
-        port: String,
-        #[arg(long, default_value_t = 115_200)]
-        baud: u32,
+        #[command(flatten)]
+        connection: Connection,
         /// Verb to call after the `prepare` hook (no arguments). Repeat for several, in order.
         #[arg(long = "verb")]
         verbs: Vec<String>,
@@ -46,6 +72,23 @@ enum Command {
         #[arg(long)]
         raw_log: Option<PathBuf>,
     },
+    /// Run a script's parsers over recorded output, no hardware: a raw log from
+    /// `dut run --raw-log`, or a capture of device output (text or binary).
+    /// Signals go to stdout as JSON lines.
+    Replay {
+        /// Path to the device script.
+        script: PathBuf,
+        /// Raw log or text sample.
+        input: PathBuf,
+    },
+    /// Load a script against a device and call verbs by hand. Signals stream to
+    /// stdout as JSON lines; prompts and results go to stderr.
+    Shell {
+        /// Path to the device script.
+        script: PathBuf,
+        #[command(flatten)]
+        connection: Connection,
+    },
 }
 
 fn main() -> ExitCode {
@@ -53,25 +96,39 @@ fn main() -> ExitCode {
         Command::Test { script } => test(&script),
         Command::Run {
             script,
-            port,
-            baud,
+            connection,
             verbs,
             duration,
             raw_log,
-        } => match run(&script, &port, baud, &verbs, duration, raw_log.as_deref()) {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::FAILURE
-            }
-        },
+        } => exit(run(
+            &script,
+            &connection,
+            &verbs,
+            duration,
+            raw_log.as_deref(),
+        )),
+        Command::Replay { script, input } => exit(replay::replay(&script, &input)),
+        Command::Shell { script, connection } => exit(
+            std::fs::read_to_string(&script)
+                .map_err(|e| format!("{}: {e}", script.display()))
+                .and_then(|source| interactive::shell(&source, connection.open()?)),
+        ),
+    }
+}
+
+fn exit(result: Result<(), String>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
     }
 }
 
 fn run(
     script: &Path,
-    port: &str,
-    baud: u32,
+    connection: &Connection,
     verbs: &[String],
     duration: f64,
     raw_log: Option<&Path>,
@@ -81,7 +138,7 @@ fn run(
     let raw = raw_log
         .map(|p| std::fs::File::create(p).map_err(|e| format!("{}: {e}", p.display())))
         .transpose()?;
-    let port = open_port(port, baud).map_err(|e| e.to_string())?;
+    let port = connection.open()?;
     let recorder = JsonLinesRecorder::new(std::io::stdout(), raw);
     let recorder = session(&source, SerialHost::new(port, recorder), verbs, duration)?;
     match recorder.error {
@@ -129,6 +186,18 @@ fn test(path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("device.py");
+    match typecheck::check(&source, name) {
+        Ok(None) => {}
+        Ok(Some(diagnostics)) => {
+            print!("{diagnostics}");
+            return ExitCode::FAILURE;
+        }
+        Err(e) => println!("warning: type check unavailable: {e}"),
+    }
     let registry = match MontyRunner::new(FakeHost::new()).load(&source) {
         Ok(r) => r,
         Err(e) => {
@@ -261,7 +330,9 @@ mod tests {
             "{signals}"
         );
         assert!(
-            signals.contains(r#""kind": "record", "payload": {"temp_c": 21.5}"#),
+            signals.contains(
+                r#""kind": "metric", "payload": {"labels": {}, "name": "temp_c", "value": 21.5}"#
+            ),
             "{signals}"
         );
         let raw = String::from_utf8(raw.unwrap_or_default())?;

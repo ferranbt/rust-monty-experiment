@@ -12,6 +12,8 @@ path = "src/main.rs"
 dut-runtime.workspace = true
 clap.workspace = true
 serialport.workspace = true
+monty-type-checking.workspace = true
+monty-types.workspace = true
 
 [dev-dependencies]
 pollster.workspace = true

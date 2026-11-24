@@ -14,8 +14,11 @@ pub mod runner;
 
 pub use fake::{FakeHost, Rule, SimDevice};
 pub use host::{Event, EventKind, Framing, Host, HostError, Seconds, SignalKind, TimerSpec, Value};
+pub use record::Metric;
 pub use record::{Dir, JsonLinesRecorder, MemoryRecorder, RawEntry, Recorder, Signal};
-pub use runner::{EventType, MontyRunner, Registry, ScriptError, ScriptRunner, VerbInfo};
+pub use runner::{
+    MetricInfo, MetricKind, MontyRunner, Registry, ScriptError, ScriptRunner, VerbInfo,
+};
 
 #[cfg(test)]
 mod tests;

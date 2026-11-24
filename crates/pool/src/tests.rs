@@ -71,7 +71,7 @@ async fn sensor_example_runs_in_a_worker() -> Result<()> {
     s.pump(3.0).await?;
     let fw = Value::dict([("fw", "1.4.2".into())]);
     assert_eq!(s.host().of_kind("identity"), [&fw]);
-    assert!(s.host().of_kind("record").len() >= 3);
+    assert!(s.host().of_kind("metric").len() >= 3);
     s.close().await;
     pool.close().await;
     Ok(())
@@ -90,7 +90,7 @@ async fn sessions_run_in_parallel() -> Result<()> {
                 let mut s = pool.open(SENSOR, sensor()).await?;
                 s.call_verb("tx_on", &[]).await?;
                 s.pump(2.0).await?;
-                Ok::<_, SessionError>(s.close().await.of_kind("record").len())
+                Ok::<_, SessionError>(s.close().await.of_kind("metric").len())
             })
         })
         .collect();

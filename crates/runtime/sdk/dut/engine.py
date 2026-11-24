@@ -1,8 +1,7 @@
 # Runs INSIDE the Monty sandbox. Entry points the host calls via feed_run.
 # Not part of the customer API. Everything returned here is plain data.
-from dut.core import now, next_event, _rt, device
-from dut.flow import _dispatch, _run_pending
-from dut.signals import record
+from dut.core import now, _rt, device
+from dut.flow import _dispatch, _run_pending, _next
 
 
 def _start():
@@ -37,10 +36,7 @@ def read(name):
     if name not in dev.readers:
         raise KeyError(f"reader '{name}' is not defined by this device")
     _start()
-    value = dev.readers[name]()
-    if isinstance(value, dict):
-        record(value)
-    return value
+    return dev.readers[name]()
 
 
 def pump(seconds):
@@ -53,7 +49,7 @@ def pump(seconds):
         remaining = deadline - now()
         if remaining <= 0:
             return None
-        ev = next_event(remaining)
+        ev = _next(remaining)
         if ev is None:
             return None
         _dispatch(ev)

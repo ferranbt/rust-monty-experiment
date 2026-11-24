@@ -10,6 +10,7 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
+use std::net::TcpStream;
 use std::time::{Duration, Instant};
 
 use dut_runtime::framing::ChannelFramers;
@@ -54,6 +55,70 @@ impl Transport for Box<dyn serialport::SerialPort> {
             Err(e) => Err(e),
         }
     }
+}
+
+/// A device reached over TCP: an emulator's serial console (QEMU `-serial tcp::4321,server`,
+/// Renode, Wokwi) or a serial-to-network bridge. The same bytes as a serial port.
+impl Transport for TcpStream {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        Write::write_all(self, data)
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        // a zero read timeout means "block forever" to the OS
+        self.set_read_timeout(Some(timeout.max(Duration::from_millis(1))))?;
+        match self.read(buf) {
+            Ok(0) => Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            )),
+            Ok(n) => Ok(n),
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::TimedOut
+                        | io::ErrorKind::WouldBlock
+                        | io::ErrorKind::Interrupted
+                ) =>
+            {
+                Ok(0)
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Where the device is: a serial port or a TCP address.
+pub enum Link {
+    Serial(Box<dyn serialport::SerialPort>),
+    Tcp(TcpStream),
+}
+
+impl Transport for Link {
+    fn write_all(&mut self, data: &[u8]) -> io::Result<()> {
+        match self {
+            Link::Serial(port) => Transport::write_all(port, data),
+            Link::Tcp(stream) => Transport::write_all(stream, data),
+        }
+    }
+
+    fn read_timeout(&mut self, buf: &mut [u8], timeout: Duration) -> io::Result<usize> {
+        match self {
+            Link::Serial(port) => port.read_timeout(buf, timeout),
+            Link::Tcp(stream) => stream.read_timeout(buf, timeout),
+        }
+    }
+}
+
+/// Connect to a device's TCP serial stream, e.g. `localhost:4321`.
+pub fn connect_tcp(address: &str) -> Result<TcpStream, HostError> {
+    let stream =
+        TcpStream::connect(address).map_err(|e| HostError::Transport(format!("{address}: {e}")))?;
+    // interactive console traffic: send small writes at once
+    stream
+        .set_nodelay(true)
+        .map_err(|e| HostError::Transport(format!("{address}: {e}")))?;
+    Ok(stream)
 }
 
 /// Open a serial port by path at `baud`, 8N1, no flow control.
@@ -356,25 +421,20 @@ mod tests {
         let port = MockPort::default().reply(b"radio ch", &[b"[log] busy\n", b"ch=", b"19\n"]);
         let mut runner = MontyRunner::new(host(port));
         runner.load(
-            "from dut import Device, request, record\n\
-             dev = Device(\"pi\", sdk=\"0.1\")\n\
-             @dev.on_frame\n\
-             def parse(frame):\n    record({\"line\": frame.decode()})\n\
+            "from dut import Device, Text, request\n\
+             dev = Device(\"pi\", sdk=\"0.1\", format=Text())\n\
              @dev.set_channel\n\
-             def set_channel(channel):\n    return request(f\"radio ch {channel}\\n\".encode(), match=b\"ch=\", timeout=1)\n",
+             def set_channel(channel):\n    return request(f\"radio ch {channel}\\n\", match=\"ch=\", timeout=1)\n",
         )?;
         assert_eq!(
             runner.call_verb("set_channel", &[("channel", Value::Int(19))])?,
-            Value::from(b"ch=19")
+            Value::from("ch=19")
         );
         let (port, rec) = runner.into_host().into_parts();
         assert_eq!(port.written, [b"radio ch 19\n".to_vec()]);
-        let lines: Vec<_> = rec
-            .signals
-            .iter()
-            .filter_map(|s| s.payload.get("line").cloned())
-            .collect();
-        assert_eq!(lines, [Value::from("[log] busy"), Value::from("ch=19")]);
+        // text mode logs every line, the unsolicited one and the reply
+        let lines: Vec<_> = rec.signals.iter().filter_map(|s| s.log_text()).collect();
+        assert_eq!(lines, ["[log] busy", "ch=19"]);
         Ok(())
     }
 

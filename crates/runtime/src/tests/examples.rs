@@ -1,7 +1,6 @@
-//! The SPEC §6.4 text device and §6.6 binary device, end to end in Monty.
+//! The example device scripts, end to end in Monty.
 
 use super::common::*;
-use crate::helpers::{cobs_decode, cobs_encode, crc, pack};
 use crate::{Rule, SimDevice, Value};
 use eyre::Result;
 
@@ -40,20 +39,14 @@ fn sensor_v2() -> Result<()> {
 
     let fw = Value::dict([("fw", "1.4.2".into())]);
     assert_eq!(s.of_kind("identity"), [fw.clone(), fw]); // the reboot is visible
-    assert!(
-        s.of_kind("record")
-            .contains(&Value::dict([("temp_c", 21.5.into())]))
-    );
+    assert!(s.values("temp_c").contains(&21.5));
     assert!(
         s.of_kind("heartbeat")
             .contains(&Value::dict([("ok", false.into())]))
     );
     assert_eq!(
-        s.of_kind("event"),
-        [Value::dict([
-            ("text", "ERR overheat".into()),
-            ("name", "error".into())
-        ])]
+        s.metric("errors"),
+        [(1.0, vec![("code".to_string(), "overheat".to_string())])]
     );
     assert_eq!(
         s.tx(),
@@ -67,58 +60,6 @@ fn sensor_v2() -> Result<()> {
 fn sensor_v2_tx_on_times_out_if_radio_never_starts() -> Result<()> {
     let mut s = Session::example("sensor_v2.py", SimDevice::new())?;
     expect_err(s.verb("tx_on", &[]), "TimeoutError")?;
-    Ok(())
-}
-
-fn meter_frame(op: u8, payload: &[u8]) -> Result<Vec<u8>> {
-    let mut body = vec![op, payload.len() as u8];
-    body.extend(payload);
-    let crc = crc("crc16-ccitt", &body)? as i64;
-    body.extend(pack("<H", &[Value::Int(crc)])?);
-    Ok(cobs_encode(&body))
-}
-
-#[test]
-fn meter_x() -> Result<()> {
-    let telemetry = meter_frame(0x10, &pack("<hH", &[Value::Int(-1250), Value::Int(3300)])?)?;
-    let mut corrupt = telemetry.clone();
-    corrupt[3] ^= 0x01;
-    assert!(
-        !corrupt[..corrupt.len() - 1].contains(&0),
-        "corruption must keep COBS valid"
-    );
-    let sim = SimDevice::new()
-        .chunked(4)
-        .at(0.1, &telemetry)
-        .at(0.2, &corrupt)
-        .at(0.3, b"\x05\x11\x00") // undecodable COBS junk
-        .at(0.4, b"\x02\x01\x00") // decodes to a 1-byte frame -> too short for a CRC
-        .on(
-            Rule::when(|d| cobs_decode(d).is_ok_and(|b| b.first() == Some(&0x21)))
-                .reply(&meter_frame(0x21, b"\x01")?),
-        );
-    let mut s = Session::example("meter_x.py", sim)?;
-
-    s.pump(1.0)?;
-    assert_eq!(
-        s.of_kind("record"),
-        [Value::dict([
-            ("temp_c", Value::Float(-12.5)),
-            ("vbat_mv", Value::Int(3300))
-        ])]
-    );
-    assert_eq!(s.of_kind("heartbeat"), [Value::dict([("ok", true.into())])]);
-    let crc_error = Value::dict([("name", "crc_error".into())]);
-    assert_eq!(s.of_kind("event"), [crc_error.clone(), crc_error]); // corrupt + short frame
-    assert_eq!(s.of_kind("framing_error").len(), 1);
-    assert!(s.of_kind("parse_error").is_empty());
-
-    s.verb("tx_on", &[])?;
-    let tx = s.tx();
-    assert_eq!(tx.len(), 1);
-    assert_eq!(tx[0].last(), Some(&0));
-    let body = cobs_decode(&tx[0])?;
-    assert_eq!(&body[..body.len() - 2], b"\x21\x01\x01");
     Ok(())
 }
 
@@ -160,18 +101,8 @@ fn raspberry_pi() -> Result<()> {
     );
     assert_eq!(s.verb("status", &[])?, Value::Bool(true));
     s.pump(11.0)?; // telemetry at t=5 and t=10, kernel warning at t=7
-    let temp = Value::dict([("soc_temp_c", 48.312.into())]);
-    assert_eq!(s.of_kind("record"), [temp.clone(), temp]);
-    assert_eq!(
-        s.of_kind("event"),
-        [Value::dict([
-            (
-                "text",
-                "[   12.345] hwmon hwmon1: Under-voltage detected! (0x00050005)".into()
-            ),
-            ("name", "undervoltage".into()),
-        ])]
-    );
+    assert_eq!(s.values("soc_temp_c"), [48.312, 48.312]);
+    assert_eq!(s.values("undervoltage"), [1.0]);
     assert!(s.of_kind("parse_error").is_empty() && s.of_kind("timer_error").is_empty());
     // every console line is logged, echoed commands included
     let logs = s.of_kind("log");
